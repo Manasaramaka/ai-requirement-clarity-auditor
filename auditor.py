@@ -1,220 +1,326 @@
 import os
 import json
+import re
 from pathlib import Path
+from typing import Any, Dict, List
 
+import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 
 
-# ---------- 1) Load environment variables ----------
+# -----------------------------
+# 1) Environment + Client Setup
+# -----------------------------
 def load_env() -> None:
+    """
+    Loads environment variables for local dev and Streamlit Cloud.
+
+    Local:
+      - Reads .env from project root (same folder as this file)
+
+    Streamlit Cloud:
+      - Reads st.secrets["GEMINI_API_KEY"] if present
+      - Optionally reads st.secrets["GEMINI_MODEL"] if present
+    """
     env_path = Path(__file__).resolve().parent / ".env"
     load_dotenv(dotenv_path=env_path)
 
+    # Streamlit Cloud secrets override (if available)
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+        if "GEMINI_MODEL" in st.secrets:
+            os.environ["GEMINI_MODEL"] = st.secrets["GEMINI_MODEL"]
+    except Exception:
+        # If not running inside Streamlit, st.secrets may not be available
+        pass
 
-# ---------- 2) Master prompt (embedded for MVP) ----------
+
+def get_client_and_model() -> tuple[genai.Client, str]:
+    load_env()
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY not found. Add it to .env (local) or Streamlit Secrets (cloud)."
+        )
+
+    # Use a stable default model; you can override via GEMINI_MODEL
+    model = os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash-lite").strip()
+
+    client = genai.Client(api_key=api_key)
+    return client, model
+
+
+# -----------------------------
+# 2) Prompt Construction
+# -----------------------------
 def build_master_prompt(requirement_text: str) -> str:
     """
-    This prompt forces the model to act as an auditor and return strict JSON only.
-    We embed the API/backend checklist logic here for the MVP.
+    Forces strict JSON-only output and audits API/backend requirement clarity.
     """
     return f"""
-You are the AI Requirement Clarity Auditor. Your job is to audit requirements for clarity and execution readiness.
-You must NOT rewrite the entire requirement document and must NOT invent requirements.
-Be strict: if something is not explicitly stated, mark it as missing.
+You are the AI Requirement Clarity Auditor.
 
-Domain focus: API and backend specifications.
+Your job:
+Audit the requirement text for structural clarity, measurability, completeness, edge cases, and delivery risk.
 
-Return ONLY a valid JSON object that matches the schema below.
-Do not include markdown. Do not include commentary. Do not include extra keys.
+Important constraints:
+- Return ONLY valid JSON.
+- Do not include markdown, code fences, or commentary.
+- Do not include extra keys.
+- Do not include trailing commas.
+- Use double quotes for all JSON strings.
+- If the requirement text is extremely short or not a requirement, still return a valid JSON report with low score and clear gaps.
 
-Scoring intent:
-The application will compute the final clarity score deterministically.
-You must provide honest checklist statuses and gap lists.
+Output JSON schema (exact keys required):
 
-API/backend checklist expectations (use these to evaluate completeness):
-- Endpoint and HTTP method defined
-- Authentication defined
-- Authorization and permissions defined
-- Request schema defined (fields and types)
-- Response schema defined (fields and types)
-- Error handling and status codes defined
-- Versioning strategy defined
-- Pagination strategy defined (if list endpoints)
-- Rate limits defined
-- Timeouts and retries defined
-- Idempotency behavior defined (if create/update)
-- Observability requirements defined (logs, metrics, traces)
-
-Edge case expectations (identify which are missing and ask clarifying questions):
-- Invalid input formats and ranges
-- Missing required fields
-- Authentication failure
-- Authorization failure
-- Not found behavior
-- Conflict or concurrency behavior
-- Rate limit exceeded
-- Upstream dependency timeout or failure
-- Duplicate request handling (idempotency)
-- Partial failure handling (if multi-step)
-- Backward compatibility considerations
-
-Metric expectations (identify which are missing and suggest reasonable metrics):
-- Latency target (p95 or p99)
-- Throughput target (RPS) or capacity expectation
-- Availability or SLA target
-- Timeout thresholds
-- Error rate budget
-
-JSON schema (must match exactly, keep all fields even if empty):
 {{
+  "clarity_score": <integer 0-100>,
+  "risk_level": "<Low|Medium|High>",
   "executive_summary": {{
-    "top_gaps": [],
-    "top_quick_fixes": []
+    "top_gaps": [<string>, <string>, <string>],
+    "top_quick_fixes": [<string>, <string>, <string>]
   }},
   "contract_completeness": {{
     "checklist": [
-      {{ "item": "", "status": "Yes", "notes": "" }}
-    ],
-    "missing_items": []
-  }},
-  "measurability_audit": {{
-    "missing_metrics": [],
-    "suggested_metrics": [
-      {{ "metric": "", "target": "", "notes": "" }}
+      {{
+        "item": "<string>",
+        "status": "<Yes|No|Partial>",
+        "notes": "<string>"
+      }}
     ]
   }},
+  "measurability_audit": {{
+    "missing_metrics": [<string>],
+    "suggested_metrics": [<string>]
+  }},
   "ambiguity_flags": [
-    {{ "phrase": "", "issue": "", "suggested_rewrite": "" }}
+    {{
+      "phrase": "<string>",
+      "issue": "<string>",
+      "suggested_rewrite": "<string>"
+    }}
   ],
   "edge_case_coverage": {{
-    "missing_edge_cases": [],
-    "questions_to_clarify": []
+    "missing_edge_cases": [<string>],
+    "clarifying_questions": [<string>]
   }},
   "risk_flags": [
-    {{ "risk": "", "severity": "Low", "mitigation": "" }}
+    {{
+      "risk": "<string>",
+      "severity": "<Low|Medium|High>",
+      "mitigation": "<string>"
+    }}
   ],
   "acceptance_criteria": [
-    {{ "given": "", "when": "", "then": "" }}
+    {{
+      "given": "<string>",
+      "when": "<string>",
+      "then": "<string>"
+    }}
   ]
 }}
 
-Now audit the following requirement document:
+Scoring guidance (use these categories implicitly):
+- Contract completeness (endpoints, schemas, auth, errors, versioning)
+- Measurability (latency, throughput, SLAs, timeouts, success metrics)
+- Edge case coverage (invalid inputs, auth failures, retries, idempotency, dependency failures)
+- Ambiguity control (avoid vague terms like fast, scalable, user-friendly without numbers)
+- Risk awareness (dependencies, security/compliance, observability)
+- Testability (Given/When/Then acceptance criteria)
+
+Risk level guidance:
+- High: missing core API contract elements or heavy ambiguity
+- Medium: core exists but multiple gaps remain
+- Low: clear, measurable, edge-case aware, testable
+
+Requirement text:
 \"\"\"{requirement_text}\"\"\"
 """.strip()
 
 
-# ---------- 3) Parse and validate JSON ----------
-REQUIRED_TOP_KEYS = {
-    "executive_summary",
-    "contract_completeness",
-    "measurability_audit",
-    "ambiguity_flags",
-    "edge_case_coverage",
-    "risk_flags",
-    "acceptance_criteria",
-}
-
-def safe_json_loads(text: str) -> dict:
+# -----------------------------
+# 3) JSON Extraction + Validation
+# -----------------------------
+def _extract_json_object(text: str) -> str:
+    """
+    Attempts to extract the first valid JSON object from a response string.
+    """
     text = text.strip()
 
-    # direct parse
+    # If response is already JSON
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    # Otherwise extract first {...} block
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match:
+        return match.group(0).strip()
+
+    raise ValueError("No JSON object found in model response.")
+
+
+def _safe_parse_json(text: str) -> Dict[str, Any]:
+    raw = _extract_json_object(text)
+    return json.loads(raw)
+
+
+def _default_report() -> Dict[str, Any]:
+    """
+    Fallback report if the model fails.
+    """
+    return {
+        "clarity_score": 20,
+        "risk_level": "High",
+        "executive_summary": {
+            "top_gaps": [
+                "Requirement lacks sufficient detail to be implementation-ready.",
+                "Success criteria and measurable targets are missing.",
+                "Edge cases and failure handling are not defined.",
+            ],
+            "top_quick_fixes": [
+                "Define endpoints, request/response fields, and authentication approach.",
+                "Add measurable performance targets (latency, timeouts, throughput).",
+                "Document failure modes and write Given/When/Then acceptance criteria.",
+            ],
+        },
+        "contract_completeness": {
+            "checklist": [
+                {"item": "Endpoint path and HTTP method defined", "status": "No", "notes": ""},
+                {"item": "Authentication/authorization defined", "status": "No", "notes": ""},
+                {"item": "Request schema defined", "status": "No", "notes": ""},
+                {"item": "Response schema defined", "status": "No", "notes": ""},
+                {"item": "Error handling and status codes defined", "status": "No", "notes": ""},
+                {"item": "Versioning strategy defined", "status": "No", "notes": ""},
+                {"item": "Rate limits/timeouts/retries defined", "status": "No", "notes": ""},
+                {"item": "Idempotency behavior defined (if applicable)", "status": "No", "notes": ""},
+                {"item": "Observability/logging/metrics defined", "status": "No", "notes": ""},
+            ]
+        },
+        "measurability_audit": {
+            "missing_metrics": ["Latency target", "Timeout policy", "Throughput expectations", "Success metric definition"],
+            "suggested_metrics": [
+                "Define p95 latency target (e.g., <= 250ms) for core endpoints.",
+                "Define request timeout and retry behavior (e.g., 3 retries with exponential backoff).",
+                "Define throughput or QPS expectation and scaling assumptions.",
+                "Define success criteria (e.g., error rate, completion rate, SLO).",
+            ],
+        },
+        "ambiguity_flags": [
+            {
+                "phrase": "fast / scalable / reliable (if used)",
+                "issue": "These are subjective without measurable thresholds.",
+                "suggested_rewrite": "Specify measurable targets (latency p95, QPS, error rate, availability).",
+            }
+        ],
+        "edge_case_coverage": {
+            "missing_edge_cases": [
+                "Invalid or missing required fields",
+                "Authentication failures",
+                "Dependency timeouts and failures",
+                "Duplicate requests and idempotency",
+            ],
+            "clarifying_questions": [
+                "What are the expected error responses and status codes for common failure paths?",
+                "What timeouts and retry policies should clients use?",
+                "How should the system behave on duplicate create requests?",
+            ],
+        },
+        "risk_flags": [
+            {"risk": "Undefined API contract", "severity": "High", "mitigation": "Document endpoints, schemas, auth, and error handling."},
+            {"risk": "Unclear success metrics", "severity": "Medium", "mitigation": "Define measurable targets and acceptance criteria."},
+        ],
+        "acceptance_criteria": [
+            {"given": "a valid request payload", "when": "the client calls the endpoint", "then": "the service returns a 2xx response with the expected schema"},
+            {"given": "an invalid request payload", "when": "the client calls the endpoint", "then": "the service returns a 4xx response with a standardized error format"},
+        ],
+    }
+
+
+def _ensure_required_shape(report: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensures required keys exist so Streamlit UI doesn't crash.
+    Fills missing sections with safe defaults.
+    """
+    base = _default_report()
+
+    def merge(a: Any, b: Any) -> Any:
+        # a is default, b is model output
+        if isinstance(a, dict) and isinstance(b, dict):
+            out = dict(a)
+            for k, v in b.items():
+                if k in out:
+                    out[k] = merge(out[k], v)
+                else:
+                    out[k] = v
+            return out
+        return b if b is not None else a
+
+    merged = merge(base, report)
+
+    # Normalize types
     try:
-        return json.loads(text)
+        merged["clarity_score"] = int(merged.get("clarity_score", base["clarity_score"]))
     except Exception:
-        pass
+        merged["clarity_score"] = base["clarity_score"]
 
-    # try extracting first {...} block
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end + 1]
-        return json.loads(candidate)
+    risk = str(merged.get("risk_level", "High")).strip().title()
+    if risk not in {"Low", "Medium", "High"}:
+        risk = "High"
+    merged["risk_level"] = risk
 
-    raise ValueError("Model response was not valid JSON.")
-
-def validate_schema(report: dict) -> None:
-    missing = REQUIRED_TOP_KEYS - set(report.keys())
-    if missing:
-        raise ValueError(f"Missing keys in report: {sorted(missing)}")
+    return merged
 
 
-# ---------- 4) Deterministic hybrid scoring ----------
-def compute_clarity_score(report: dict) -> int:
+# -----------------------------
+# 4) Main Audit Function
+# -----------------------------
+def run_audit(requirement_text: str) -> Dict[str, Any]:
     """
-    Score is computed deterministically from the returned JSON fields.
-    0 to 100 scale.
+    Main entry point used by app.py.
+    Returns a structured dictionary for UI rendering.
     """
+    requirement_text = (requirement_text or "").strip()
+    if not requirement_text:
+        return _default_report()
 
-    # Contract completeness (30)
-    checklist = report.get("contract_completeness", {}).get("checklist", [])
-    if checklist:
-        yes_count = sum(1 for x in checklist if str(x.get("status", "")).lower() == "yes")
-        contract_score = round(30 * (yes_count / max(len(checklist), 1)))
-    else:
-        contract_score = 0
-
-    # Measurability (20) penalty by missing metrics
-    missing_metrics = report.get("measurability_audit", {}).get("missing_metrics", [])
-    meas_score = max(20 - 4 * len(missing_metrics), 0)
-
-    # Edge cases (20) penalty by missing edge cases
-    missing_edge = report.get("edge_case_coverage", {}).get("missing_edge_cases", [])
-    edge_score = max(20 - 2 * len(missing_edge), 0)
-
-    # Ambiguity control (15) penalty by ambiguity flags
-    ambiguity_flags = report.get("ambiguity_flags", [])
-    amb_score = max(15 - 3 * len(ambiguity_flags), 0)
-
-    # Risk awareness (10) small reward if mitigations exist (bounded)
-    risk_flags = report.get("risk_flags", [])
-    mitigations = sum(1 for r in risk_flags if (r.get("mitigation") or "").strip())
-    risk_score = min(10, 2 * mitigations)
-
-    # Testability (5) based on acceptance criteria count
-    ac = report.get("acceptance_criteria", [])
-    test_score = 5 if len(ac) >= 3 else (3 if len(ac) >= 1 else 0)
-
-    total = contract_score + meas_score + edge_score + amb_score + risk_score + test_score
-    return int(max(0, min(100, total)))
-
-def derive_risk_level(score: int, risk_flags: list[dict]) -> str:
-    high = sum(1 for r in risk_flags if str(r.get("severity", "")).lower() == "high")
-    if score >= 80 and high == 0:
-        return "Low"
-    if score < 60 or high >= 2:
-        return "High"
-    return "Medium"
-
-
-# ---------- 5) Main audit function ----------
-def run_audit(requirement_text: str) -> dict:
-    load_env()
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not found. Check your .env file.")
-
-    client = genai.Client(api_key=api_key)
-
+    client, model = get_client_and_model()
     prompt = build_master_prompt(requirement_text)
 
-    resp = client.models.generate_content(
-        model=model_name,
-        contents=prompt
+    # Retry strategy for JSON compliance
+    attempts = 2
+    last_error = None
+
+    for _ in range(attempts):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=prompt,
+            )
+
+            # google-genai usually returns text in resp.text
+            raw_text = getattr(resp, "text", None)
+            if raw_text is None:
+                # fallback for some response shapes
+                raw_text = str(resp)
+
+            parsed = _safe_parse_json(raw_text)
+            shaped = _ensure_required_shape(parsed)
+            return shaped
+
+        except Exception as e:
+            last_error = e
+            # Strengthen prompt for second pass
+            prompt = (
+                prompt
+                + "\n\nReminder: Return ONLY valid JSON exactly matching the schema. No extra text."
+            )
+
+    # If all attempts fail, return fallback
+    fallback = _default_report()
+    fallback["executive_summary"]["top_gaps"][0] = (
+        f"Model response could not be parsed as JSON. Using fallback report. Error: {last_error}"
     )
-
-    raw = (resp.text or "").strip()
-    report = safe_json_loads(raw)
-    validate_schema(report)
-
-    score = compute_clarity_score(report)
-    risk_level = derive_risk_level(score, report.get("risk_flags", []))
-
-    # Add score fields for UI
-    report["clarity_score"] = score
-    report["risk_level"] = risk_level
-
-    return report
+    return fallback
