@@ -60,6 +60,7 @@ The system transforms loosely written requirements into structured, auditable ar
 ## Interface Preview
 
 ![AI Requirement Clarity Auditor](assets/dashboard.png)
+Demo : https://youtu.be/qgWM8TCSXYc
 
 ## Architecture
 
