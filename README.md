@@ -16,6 +16,8 @@ Instead of generating new specifications, it audits existing requirements and su
 
 Clear requirements reduce delivery risk.
 
+Access it here: https://ai-requirement-clarity-auditor.streamlit.app/
+
 ---
 
 ## Problem
