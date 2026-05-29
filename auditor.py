@@ -47,7 +47,7 @@ def get_client_and_model() -> tuple[genai.Client, str]:
         )
 
     # Use a stable default model; you can override via GEMINI_MODEL
-    model = os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash-lite").strip()
+    model = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash").strip()
 
     client = genai.Client(api_key=api_key)
     return client, model
@@ -295,7 +295,7 @@ def run_audit(requirement_text: str) -> Dict[str, Any]:
     prompt = build_master_prompt(requirement_text)
 
     # Retry strategy for JSON compliance
-    attempts = 2
+    attempts = 1
     last_error = None
 
     for _ in range(attempts):
