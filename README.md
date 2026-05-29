@@ -16,6 +16,8 @@ Instead of generating new specifications, it audits existing requirements and su
 
 Clear requirements reduce delivery risk.
 
+Access it here: https://ai-requirement-clarity-auditor.streamlit.app/
+
 ---
 
 ## Problem
@@ -60,6 +62,12 @@ The system transforms loosely written requirements into structured, auditable ar
 ## Interface Preview
 
 ![AI Requirement Clarity Auditor](assets/dashboard.png)
+
+## 🎥 Demo Video
+
+Watch the 60-second demo here:
+
+[▶ Watch Demo](https://youtu.be/qgWM8TCSXYc)
 
 ## Architecture
 
